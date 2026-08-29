@@ -473,7 +473,7 @@ export function apply(ctx: Context): void {
   /** Execute one slash-command line against the live agent. */
   async function executeCommand(line: string): Promise<void> {
     if (agent === undefined) return
-    const outcome = await ctx.commands.execute(agent, line, new AbortController().signal)
+    const outcome = await ctx.commands.execute(agent, line, [], new AbortController().signal)
     if (outcome === undefined) {
       store.setNotice(`unknown command: ${line}`, 'error')
     } else if (outcome.result.kind === 'error') {
