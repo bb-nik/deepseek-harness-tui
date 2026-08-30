@@ -495,6 +495,16 @@ export function apply(ctx: Context): void {
     }
     try {
       await ctx.agentPresets.recompose(agent.ctx, id)
+      // recompose() only rebinds the live scope -- it doesn't itself log the
+      // switch. dsh-agent-presets' own docs say a switch is "an
+      // agent-preset/selected session event appended after the swap
+      // commits", but that append is dsh-apiproxy's (the wire/gateway
+      // layer's) responsibility, which this in-process host never goes
+      // through. Without this, resolveSessionPreset() would fall back to
+      // the creation-time header on a later /resume or fork, silently
+      // reverting to whatever preset the session started on. Append it
+      // ourselves, the same way any other session event gets recorded.
+      agent.session.append('agent-preset/selected', { agentPreset: id })
     } catch (error) {
       store.setNotice(`/preset failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
       setTimeout(() => { store.setNotice(undefined) }, 6000)
