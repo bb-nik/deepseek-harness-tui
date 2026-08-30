@@ -8,7 +8,7 @@
 - insert:
     - id: tui
       name: 'dsh-tui'
-      inject: [agents, sessions, agentDefaultModel, sessionQuery, userQuestions, commands, tools]
+      inject: [agents, sessions, agentDefaultModel, agentPresets, sessionQuery, userQuestions, commands, tools]
     # Whole-log turn/step counts and LLM/TTFT/decode wall times for the status
     # bar's stats line. Per its own README, this is "mounted only in the
     # web-app bundle" by default — other assemblies serve no sessionStats key
@@ -16,3 +16,15 @@
     # silently drops out of buildStatsLine() without it.
     - id: session-stats
       name: '@deepseek-ai/dsh-session-stats'
+    # Preset roster and mid-session preset switching for `/presets` and
+    # `--agent-preset`. dsh-base doesn't mount this row (only dsh-web-app's
+    # bundle does by default) — @tomowang/dsh-tui's own cordis.patch.yml
+    # mounts a bare copy for the identical reason, confirming the deepseek
+    # harness CLI's profile-boot patches ship the standard/code/minimal/
+    # cordis preset roster onto any `agent-presets` row regardless of which
+    # layer inserted it. See deepseek-harness-upgrades docs/TROUBLESHOOTING.md
+    # #24.
+    - id: agent-presets
+      name: '@deepseek-ai/dsh-agent-presets'
+      config:
+        default: standard

@@ -27,6 +27,8 @@ import type { AskUserQuestionAnswer, AskUserQuestionRequest } from '@deepseek-ai
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 import type {} from '@deepseek-ai/dsh-cmdline'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
+import { readPresetMetadata } from '@deepseek-ai/dsh-agent-presets'
+import type {} from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-session-query'
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-user-approval'
@@ -404,6 +406,28 @@ export function apply(ctx: Context): void {
       currentValue: () => model.reasoningEffort,
       onSelect: (value) => switchEffort(value),
     })
+    // The preset picker: every discoverable preset, first-root-wins per id
+    // (dsh-agent-presets' own list() semantics), with a broken preset
+    // labeled rather than hidden so it's visible why it can't be picked.
+    providers.set('preset', {
+      title: 'agent preset',
+      options: async () => {
+        const presets = await ctx.agentPresets.list()
+        return Promise.all(presets.map(async (p) => {
+          if (p.broken !== undefined) {
+            return { value: p.id, label: p.id, description: `broken: ${p.broken}` }
+          }
+          try {
+            const meta = await readPresetMetadata(p.path)
+            return { value: p.id, label: meta.name ?? p.id, description: meta.description }
+          } catch {
+            return { value: p.id, label: p.id, description: undefined }
+          }
+        }))
+      },
+      currentValue: () => ctx.agentPresets.composedPreset(agent!.ctx),
+      onSelect: (value) => switchPreset(value),
+    })
     return providers
   }
 
@@ -450,6 +474,29 @@ export function apply(ctx: Context): void {
       }
     } catch (error) {
       store.setNotice(`/effort failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
+      setTimeout(() => { store.setNotice(undefined) }, 6000)
+    }
+  }
+
+  /**
+   * Recompose the live agent onto a different preset. Only valid before the
+   * agent has produced anything -- dsh-agent-presets' own recompose() has no
+   * such guard itself ("the caller owns that check", per its README), so
+   * this checks for a prior `turn/start` event the same way `event.type ===
+   * 'turn/start'` is already read elsewhere in this file to drive the status
+   * indicator.
+   */
+  async function switchPreset(id: string): Promise<void> {
+    if (agent === undefined) return
+    if (agent.session.events.some(e => e.type === 'turn/start')) {
+      store.setNotice('/preset: cannot switch after the session has already produced a turn', 'error')
+      setTimeout(() => { store.setNotice(undefined) }, 6000)
+      return
+    }
+    try {
+      await ctx.agentPresets.recompose(agent.ctx, id)
+    } catch (error) {
+      store.setNotice(`/preset failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
       setTimeout(() => { store.setNotice(undefined) }, 6000)
     }
   }
@@ -728,6 +775,24 @@ export function apply(ctx: Context): void {
         return { kind: 'success', text: `current effort: ${model.reasoningEffort ?? 'default'}` }
       }
       void switchEffort(target)
+      return { kind: 'success' }
+    },
+  })
+  // /preset is declared as a bare picker (optionProviders above); an explicit
+  // argument form still resolves here so `/preset <id>` works too. Only
+  // valid before the session's first turn -- see switchPreset's guard.
+  ctx.commands.register({
+    name: 'preset',
+    description: 'list or switch the agent preset (before the first turn only)',
+    input: { hint: '[preset-id]' },
+    handler: ({ rawInput }) => {
+      if (agent === undefined) return { kind: 'error', text: 'no active session' }
+      const target = rawInput.trim()
+      if (target === '') {
+        const current = ctx.agentPresets.composedPreset(agent.ctx)
+        return { kind: 'success', text: `current preset: ${current ?? '(none)'}` }
+      }
+      void switchPreset(target)
       return { kind: 'success' }
     },
   })
