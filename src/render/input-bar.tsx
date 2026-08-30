@@ -317,8 +317,14 @@ export function InputBar({ value, onChange, onSubmit, controller, fileIndex }: I
       <Box borderStyle="round" borderColor="cyan" paddingX={1} flexDirection="column">
         {value === ''
           ? (
+              // Same visible block cursor as the non-empty case below (an
+              // inverted space, matching renderLineContent's own end-of-line
+              // fallback) -- without it, an idle empty input looks identical
+              // to one that's still rendering/busy, with no cue at all that
+              // it's ready for keystrokes.
               <Box flexDirection="row">
                 <Text color="cyan" bold>{'> '}</Text>
+                <Text inverse> </Text>
                 <Text dimColor>{placeholder}</Text>
               </Box>
             )
