@@ -20,6 +20,8 @@ const controller: TuiController = {
   switchSession: () => {},
   listCommands: () => [],
   ensureFileIndex: () => {},
+  pasteImageFromClipboard: async () => undefined,
+  notice: () => {},
 }
 
 function userEvent(text: string, seq: number): SessionEvent {

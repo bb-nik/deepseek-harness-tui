@@ -10,6 +10,7 @@
 import { Box, Text, Newline } from 'ink'
 import { useSyncExternalStore, useState } from 'react'
 import { useInput } from 'ink'
+import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { TuiStore, TranscriptNode } from '../store.ts'
 import { flatRecords } from '../store.ts'
 import type { TuiController } from '../controller.ts'
@@ -178,6 +179,7 @@ export function App({ store, controller, theme, banner }: AppProps): React.React
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot)
   const [density, setDensity] = useState<'folded' | 'expanded' | 'hidden'>('folded')
   const [input, setInput] = useState('')
+  const [pendingImages, setPendingImages] = useState<readonly ImageAttachmentRef[]>([])
 
   useInput((input, key) => {
     // Ctrl+O cycles transcript density in both views.
@@ -264,7 +266,22 @@ export function App({ store, controller, theme, banner }: AppProps): React.React
         ? <SelectModal store={store} select={snapshot.modal.select} />
         : null}
       {!inTrajectory && snapshot.modal === undefined
-        ? <InputBar value={input} onChange={setInput} onSubmit={(line) => { setInput(''); controller.submit(line) }} controller={controller} fileIndex={snapshot.fileIndex} />
+        ? (
+            <InputBar
+              value={input}
+              onChange={setInput}
+              onSubmit={(line) => {
+                setInput('')
+                const images = pendingImages
+                setPendingImages([])
+                controller.submit(line, images)
+              }}
+              controller={controller}
+              fileIndex={snapshot.fileIndex}
+              pendingImages={pendingImages}
+              onImagesChange={setPendingImages}
+            />
+          )
         : null}
       <StatusBar snapshot={snapshot} density={density} />
     </Box>

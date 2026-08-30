@@ -1,5 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { apply, name, inject } from '../src/host.tsx'
+import { render } from 'ink'
+import { readClipboardImage } from '../src/clipboard-image.ts'
+import type { TuiController } from '../src/controller.ts'
+import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+
+/** A minimal fake ref for test fixtures -- `attachmentId` is a branded opaque type. */
+function fakeImageRef(id: string): ImageAttachmentRef {
+  return { attachmentId: id, mediaType: 'image/png', bytes: 1, width: 1, height: 1 } as unknown as ImageAttachmentRef
+}
+
+vi.mock('../src/clipboard-image.ts', () => ({ readClipboardImage: vi.fn() }))
 
 /**
  * Full-path host wiring smoke: the fake Context implements every seam the
@@ -77,10 +88,28 @@ function fakeContext() {
       execute: vi.fn(async () => undefined),
     },
     tools: { get: () => undefined },
+    attachments: {
+      saveImage: vi.fn(async (input: { data: Uint8Array; mediaType: string; name?: string }) => ({
+        attachmentId: 'test-attachment-id',
+        mediaType: input.mediaType,
+        bytes: input.data.length,
+        width: 1,
+        height: 1,
+        ...(input.name === undefined ? {} : { name: input.name }),
+      })),
+    },
     on: vi.fn(() => () => {}),
     effect: vi.fn(() => () => {}),
   }
   return { ctx, calls, registered, handlers, getAgent: () => agent }
+}
+
+/** Pulls the real `controller` object out of the (mocked) `render(<App .../>)` call. */
+function capturedController(): TuiController {
+  const renderMock = render as unknown as { mock: { calls: Array<[{ props: { controller: TuiController } }]> } }
+  const call = renderMock.mock.calls.at(-1)
+  if (call === undefined) throw new Error('render was never called')
+  return call[0].props.controller
 }
 
 describe('host apply (full path)', () => {
@@ -140,8 +169,79 @@ describe('host apply (full path)', () => {
 
   it('exports the plugin metadata', () => {
     expect(name).toBe('dsh-tui')
-    for (const dep of ['agents', 'userQuestions', 'commands', 'tools', 'sessionProjections', 'llm']) {
+    for (const dep of ['agents', 'userQuestions', 'commands', 'tools', 'sessionProjections', 'llm', 'attachments']) {
       expect(inject).toContain(dep)
     }
+  })
+
+  describe('image attachments', () => {
+    // This fixture's currentSelection() is a constant (see the /status test
+    // above), so startAgent() doesn't reach ctx.agents.create() -- and agent
+    // stays undefined -- until awaitDefaultModel()'s full 3s bounded
+    // deadline elapses. Advance virtual time past it rather than waiting on
+    // the real clock.
+    async function applyAndBoot(ctx: unknown): Promise<void> {
+      vi.useFakeTimers()
+      try {
+        apply(ctx as Parameters<typeof apply>[0])
+        await vi.advanceTimersByTimeAsync(3000)
+      } finally {
+        vi.useRealTimers()
+      }
+    }
+
+    it('submit() with no images sends a plain text-only message (unchanged behavior)', async () => {
+      const { ctx, getAgent } = fakeContext()
+      await applyAndBoot(ctx)
+      capturedController().submit('hello')
+      expect(getAgent()?.followup).toHaveBeenCalledWith(expect.objectContaining({
+        content: [{ type: 'text', text: 'hello' }],
+      }))
+    })
+
+    it('submit() with images strips placeholder tokens from the text and appends image blocks in paste order', async () => {
+      const { ctx, getAgent } = fakeContext()
+      await applyAndBoot(ctx)
+      const ref1 = fakeImageRef('a1')
+      const ref2 = fakeImageRef('a2')
+      capturedController().submit('look [Image #1] and [Image #2]', [ref1, ref2])
+      expect(getAgent()?.followup).toHaveBeenCalledWith(expect.objectContaining({
+        content: [
+          { type: 'text', text: 'look  and' },
+          { type: 'image', attachment: ref1 },
+          { type: 'image', attachment: ref2 },
+        ],
+      }))
+    })
+
+    it('submit() with an image-only message omits the text block entirely', async () => {
+      const { ctx, getAgent } = fakeContext()
+      await applyAndBoot(ctx)
+      const ref = fakeImageRef('a1')
+      capturedController().submit('[Image #1]', [ref])
+      expect(getAgent()?.followup).toHaveBeenCalledWith(expect.objectContaining({
+        content: [{ type: 'image', attachment: ref }],
+      }))
+    })
+
+    it('pasteImageFromClipboard() saves the clipboard image via ctx.attachments and returns the ref', async () => {
+      const { ctx } = fakeContext()
+      vi.mocked(readClipboardImage).mockResolvedValueOnce({ data: new Uint8Array([1, 2, 3]), mediaType: 'image/png' })
+      apply(ctx)
+      await new Promise(resolve => setTimeout(resolve, 0))
+      const ref = await capturedController().pasteImageFromClipboard()
+      expect((ctx as any).attachments.saveImage).toHaveBeenCalledWith({ data: new Uint8Array([1, 2, 3]), mediaType: 'image/png' })
+      expect(ref).toMatchObject({ mediaType: 'image/png', bytes: 3 })
+    })
+
+    it('pasteImageFromClipboard() returns undefined when the clipboard holds no image', async () => {
+      const { ctx } = fakeContext()
+      vi.mocked(readClipboardImage).mockResolvedValueOnce(undefined)
+      apply(ctx)
+      await new Promise(resolve => setTimeout(resolve, 0))
+      const ref = await capturedController().pasteImageFromClipboard()
+      expect(ref).toBeUndefined()
+      expect((ctx as any).attachments.saveImage).not.toHaveBeenCalled()
+    })
   })
 })

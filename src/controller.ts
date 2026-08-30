@@ -5,6 +5,7 @@
 
 import type { AskUserQuestionAnswer } from '@deepseek-ai/dsh-user-questions'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
+import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 
 /** One selectable session in the resume/new-session picker. */
 export interface SessionChoice {
@@ -17,8 +18,15 @@ export interface SessionChoice {
 
 /** Actions the terminal UI invokes on the host. */
 export interface TuiController {
-  /** Submit a free-text prompt or a slash command line. */
-  submit(line: string): void
+  /** Submit a free-text prompt or a slash command line, with any images pasted into the draft (paste order). */
+  submit(line: string, images?: readonly ImageAttachmentRef[]): void
+  /**
+   * Read one image off the OS clipboard and durably save it.
+   * @returns the saved attachment, or `undefined` when the clipboard holds no image.
+   */
+  pasteImageFromClipboard(): Promise<ImageAttachmentRef | undefined>
+  /** Surface a transient status-bar notice (mirrors slash-command feedback). */
+  notice(text: string, level?: 'info' | 'error'): void
   /** Answer the active user question. */
   answerQuestion(answer: AskUserQuestionAnswer): void
   /** Reject the active user question (aborted). */

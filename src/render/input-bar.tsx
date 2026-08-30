@@ -12,11 +12,13 @@
 
 import { Box, Text } from 'ink'
 import { useInput } from 'ink'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { TuiController } from '../controller.ts'
 import type { FileIndexState } from '../store.ts'
 import { mentionQuery, matchFileCandidates } from './file-mention.ts'
 import { lineStartIndex, lineEndIndex, backwardWordBoundary, computeRowCol, moveCursorVertically } from './line-motion.ts'
+import { imagePlaceholder } from '../image-placeholder.ts'
 
 export interface InputBarProps {
   value: string
@@ -24,6 +26,8 @@ export interface InputBarProps {
   onSubmit: (line: string) => void
   controller: TuiController
   fileIndex: FileIndexState
+  pendingImages: readonly ImageAttachmentRef[]
+  onImagesChange: (images: readonly ImageAttachmentRef[]) => void
 }
 
 /** Whether a line is a slash command. */
@@ -67,7 +71,7 @@ function renderLineContent(line: string, cursorCol: number | null): React.ReactN
   )
 }
 
-export function InputBar({ value, onChange, onSubmit, controller, fileIndex }: InputBarProps): React.ReactNode {
+export function InputBar({ value, onChange, onSubmit, controller, fileIndex, pendingImages, onImagesChange }: InputBarProps): React.ReactNode {
   const [cursor, setCursor] = useState(value.length)
   const [selected, setSelected] = useState(0)
   const [mentionSelected, setMentionSelected] = useState(0)
@@ -79,6 +83,14 @@ export function InputBar({ value, onChange, onSubmit, controller, fileIndex }: I
   // an effect firing on a later, unrelated render can silently stomp a
   // selection (or a dismissal) that already applied correctly this tick.
   const [mentionDismissed, setMentionDismissed] = useState(false)
+
+  // Always-current snapshot for the Ctrl+V handler below: its clipboard read
+  // is async (~80-200ms), during which the user can keep typing -- a plain
+  // closure over `value`/`cursor`/`pendingImages` captured at keypress time
+  // would go stale and silently discard or misplace those keystrokes when
+  // the placeholder finally gets inserted.
+  const latest = useRef({ value, cursor, pendingImages })
+  latest.current = { value, cursor, pendingImages }
 
   const commands = controller.listCommands()
   const { isCommandMode, query } = commandQuery(value)
@@ -145,6 +157,30 @@ export function InputBar({ value, onChange, onSubmit, controller, fileIndex }: I
     }
     if (key.home || (key.ctrl && input === 'a')) {
       setCursor(lineStartIndex(value, cursor))
+      return
+    }
+    // Attach whatever image is on the OS clipboard right now. This can't be
+    // inferred from paste content the way text-paste is (a terminal has no
+    // way to deliver clipboard *image* bytes through normal keyboard input
+    // at all -- Cmd+V still does plain text paste, untouched, via the
+    // terminal itself) -- it has to be a deliberate, separate keypress.
+    // Inserts a `[Image #N]` placeholder token at the cursor on success; the
+    // token is cosmetic only -- see image-placeholder.ts -- the pending
+    // image list is what's actually authoritative at submit time.
+    if (key.ctrl && input === 'v') {
+      void controller.pasteImageFromClipboard().then(ref => {
+        if (ref === undefined) {
+          controller.notice('no image on the clipboard', 'error')
+          return
+        }
+        const { value: currentValue, cursor: currentCursor, pendingImages: currentImages } = latest.current
+        const token = imagePlaceholder(currentImages.length + 1)
+        onChange(currentValue.slice(0, currentCursor) + token + currentValue.slice(currentCursor))
+        setCursor(currentCursor + token.length)
+        onImagesChange([...currentImages, ref])
+      }).catch((error: unknown) => {
+        controller.notice(`clipboard paste failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
+      })
       return
     }
     if (key.end || (key.ctrl && input === 'e')) {

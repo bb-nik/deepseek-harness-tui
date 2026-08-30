@@ -17,7 +17,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type AgentHandle, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type { ModelSelection } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import type { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import type { ReasoningEffortId, ContentBlock } from '@deepseek-ai/dsh-llm'
+import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
@@ -42,13 +43,15 @@ import type { TuiController } from './controller.ts'
 import { parseTuiArgs, TUI_HELP } from './cmdline.ts'
 import { parseApiKey, parseAddProvider, splitModelArg } from './command-args.ts'
 import { loadFileIndex } from './file-index.ts'
+import { readClipboardImage } from './clipboard-image.ts'
+import { stripImagePlaceholders } from './image-placeholder.ts'
 import type { MarkdownTheme } from './markdown.tsx'
 
 /** The plugin's stable Cordis name. */
 export const name = 'dsh-tui'
 
 /** Host services required before the TUI can mount. */
-export const inject = ['agents', 'sessions', 'agentDefaultModel', 'sessionQuery', 'userQuestions', 'commands', 'tools', 'sessionProjections', 'llm']
+export const inject = ['agents', 'sessions', 'agentDefaultModel', 'sessionQuery', 'userQuestions', 'commands', 'tools', 'sessionProjections', 'llm', 'attachments']
 
 /** The light/dark markdown themes for the render tree. */
 const THEMES: Record<'dark' | 'light', MarkdownTheme> = {
@@ -508,16 +511,31 @@ export function apply(ctx: Context): void {
 
   // --- The ink App controller ----------------------------------------------
   const controller: TuiController = {
-    submit(line: string): void {
+    submit(line: string, images?: readonly ImageAttachmentRef[]): void {
       if (agent === undefined) return
       if (line.startsWith('/')) {
         void dispatchCommand(line)
         return
       }
+      const text = images === undefined || images.length === 0 ? line : stripImagePlaceholders(line)
+      const content: ContentBlock[] = []
+      if (text !== '') content.push({ type: 'text', text })
+      if (images !== undefined) {
+        for (const attachment of images) content.push({ type: 'image', attachment })
+      }
       agent.followup(createUserMessage({
-        content: [{ type: 'text', text: line }],
+        content,
         source: { kind: 'user' },
       }))
+    },
+    async pasteImageFromClipboard(): Promise<ImageAttachmentRef | undefined> {
+      const clip = await readClipboardImage()
+      if (clip === undefined) return undefined
+      return ctx.attachments.saveImage({ data: clip.data, mediaType: clip.mediaType })
+    },
+    notice(text: string, level?: 'info' | 'error'): void {
+      store.setNotice(text, level)
+      setTimeout(() => { store.setNotice(undefined) }, 6000)
     },
     answerQuestion(answer: AskUserQuestionAnswer): void {
       store.answerQuestion(answer)
