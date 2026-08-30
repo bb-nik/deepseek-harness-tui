@@ -261,10 +261,24 @@ export function InputBar({ value, onChange, onSubmit, controller, fileIndex }: I
       return
     }
     if (input !== '') {
-      // Normalizes a multi-line paste's line endings so line-splitting
-      // (rendering, Home/End, kill-line) only ever has to reason about `\n`.
-      const normalized = input.replace(/\r\n?/g, '\n')
+      // ink's stdin parser never splits a `\r` out of a multi-character
+      // chunk (it can legitimately appear inside pasted text), so a burst
+      // that arrives as literal text immediately followed by a real Enter
+      // keystroke -- e.g. an automation tool writing a whole line + Enter
+      // in one pty write, which never produces a standalone `key.return`
+      // event -- lands here instead. A *trailing* `\r`/`\r\n` is treated as
+      // that Enter and submits, matching the plain-Enter-submits model
+      // used above; a `\r` elsewhere in the burst is still a literal
+      // multi-line-paste line ending, normalized to `\n` same as before.
+      const trailingReturn = /\r\n?$/.exec(input)
+      const body = trailingReturn ? input.slice(0, trailingReturn.index) : input
+      const normalized = body.replace(/\r\n?/g, '\n')
       const next = value.slice(0, cursor) + normalized + value.slice(cursor)
+      if (trailingReturn) {
+        onSubmit(next)
+        setCursor(0)
+        return
+      }
       onChange(next)
       setCursor(cursor + normalized.length)
       setSelected(0)
