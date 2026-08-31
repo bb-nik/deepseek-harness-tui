@@ -35,6 +35,7 @@ import type {} from '@deepseek-ai/dsh-user-approval'
 import type {} from '@deepseek-ai/dsh-user-questions'
 import type {} from '@deepseek-ai/dsh-session-projection'
 import type {} from '@deepseek-ai/dsh-credentials'
+import type {} from '@deepseek-ai/dsh-system-prompt'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { render } from 'ink'
 import { App } from './render/app.tsx'
@@ -53,7 +54,7 @@ import type { MarkdownTheme } from './markdown.tsx'
 export const name = 'dsh-tui'
 
 /** Host services required before the TUI can mount. */
-export const inject = ['agents', 'sessions', 'agentDefaultModel', 'sessionQuery', 'userQuestions', 'commands', 'tools', 'sessionProjections', 'llm', 'attachments']
+export const inject = ['agents', 'sessions', 'agentDefaultModel', 'sessionQuery', 'userQuestions', 'commands', 'tools', 'sessionProjections', 'llm', 'attachments', 'systemPrompt']
 
 /** The light/dark markdown themes for the render tree. */
 const THEMES: Record<'dark' | 'light', MarkdownTheme> = {
@@ -171,6 +172,23 @@ export function apply(ctx: Context): void {
     const scoped = agentCtx.agent
     if (scoped === undefined) throw new Error('dsh-tui: agent setup has no scoped agent')
     installModelSelection(agentCtx, selectionFor(scoped))
+    // A one-time inject on /model switch (see switchModel) only reaches
+    // history at the moment of the switch -- it can't correct a model's
+    // self-belief on turns arbitrarily far downstream. This section is
+    // reassembled fresh every step (dsh-system-prompt's model), so it always
+    // states the model actually serving THIS request, even if the model was
+    // switched many turns after any injected notice.
+    agentCtx.systemPrompt.section({
+      name: 'dsh-tui:live-model',
+      order: -90,
+      text: () => {
+        const current = selectionFor(scoped).current
+        return `You are being served, right now, by ${current.provider}/${current.model}. `
+          + `If an earlier turn in this conversation described "this model"'s identity or capabilities `
+          + `(e.g. text-only, no image support) differently, that turn was produced by a different `
+          + `backend before a model switch — trust your own current capabilities over it.`
+      },
+    })
   }
 
   /**

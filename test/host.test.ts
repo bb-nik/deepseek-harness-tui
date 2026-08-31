@@ -36,11 +36,26 @@ interface FakeAgent {
   status: 'idle' | 'running'
 }
 
+interface FakeSection {
+  name: string
+  order: number
+  text: string | (() => string)
+}
+
 function fakeContext() {
   const calls: string[] = []
   const registered: string[] = []
   const handlers = new Map<string, (invocation: { rawInput: string }) => unknown>()
   let agent: FakeAgent | undefined
+  const sections: FakeSection[] = []
+  /** Mirrors the real setup(agentCtx): a scoped context with `.on` (for installModelSelection) and `.systemPrompt.section`. */
+  function fakeAgentCtx(target: FakeAgent): unknown {
+    return {
+      agent: target,
+      on: vi.fn(() => () => {}),
+      systemPrompt: { section: vi.fn((s: FakeSection) => { sections.push(s); return () => {} }) },
+    }
+  }
   const llm = {
     listProviders: () => [{ id: 'deepseek-official', name: 'DeepSeek' }],
     listModels: async () => [{ id: 'deepseek-v4-flash', name: 'V4 Flash' }],
@@ -64,7 +79,7 @@ function fakeContext() {
       saveSelection: vi.fn(async () => {}),
     },
     agents: {
-      create: vi.fn(async () => {
+      create: vi.fn(async (opts: { setup?: (agentCtx: unknown) => void }) => {
         agent = {
           id: 'session-test',
           session: { events: [], requestHeader: () => undefined },
@@ -73,6 +88,7 @@ function fakeContext() {
           inject: vi.fn(),
           status: 'idle',
         }
+        opts.setup?.(fakeAgentCtx(agent))
         return { agent, dispose: vi.fn(async () => {}) }
       }),
       resume: vi.fn(async () => ({ agent: undefined, dispose: vi.fn(async () => {}) })),
@@ -103,7 +119,7 @@ function fakeContext() {
     on: vi.fn(() => () => {}),
     effect: vi.fn(() => () => {}),
   }
-  return { ctx, calls, registered, handlers, getAgent: () => agent }
+  return { ctx, calls, registered, handlers, getAgent: () => agent, getSections: () => sections }
 }
 
 /** Pulls the real `controller` object out of the (mocked) `render(<App .../>)` call. */
@@ -160,6 +176,29 @@ describe('host apply (full path)', () => {
       content: [expect.objectContaining({ type: 'text', text: expect.stringContaining('deepseek-official/deepseek-v4-pro') })],
       source: expect.objectContaining({ kind: 'plugin', plugin: 'dsh-tui', form: 'notice' }),
     }))
+  })
+
+  it('registers a live-model system-prompt section that always names the currently active model', async () => {
+    const { ctx, handlers, getSections } = fakeContext()
+    vi.useFakeTimers()
+    try {
+      apply(ctx)
+      await vi.advanceTimersByTimeAsync(3000)
+      const liveModel = getSections().find(s => s.name === 'dsh-tui:live-model')
+      expect(liveModel).toBeDefined()
+      expect(typeof liveModel!.text).toBe('function')
+      // Before any switch: reflects the boot default from agentDefaultModel.
+      expect((liveModel!.text as () => string)()).toContain('deepseek-official/deepseek-v4-flash')
+      // After /model: the SAME registered section (a live function, not a
+      // snapshot) reflects the new model on its next call -- this is what
+      // makes it correct on every later turn, not just the one right after
+      // the switch.
+      handlers.get('model')!({ rawInput: 'deepseek-official/deepseek-v4-pro' })
+      await vi.advanceTimersByTimeAsync(0)
+      expect((liveModel!.text as () => string)()).toContain('deepseek-official/deepseek-v4-pro')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('executes /status and /rename handlers', async () => {
