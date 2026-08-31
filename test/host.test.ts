@@ -61,6 +61,16 @@ function fakeContext() {
     listModels: async () => [{ id: 'deepseek-v4-flash', name: 'V4 Flash' }],
     listConfigurableProviders: () => [{ provider: 'deepseek-official', displayName: 'DeepSeek', settingsNs: 'llm-deepseek', settingsPath: [] }],
     resolveCallConfig: async (c: { provider: string; model: string }) => ({ provider: c.provider, model: c.model }),
+    // Two distinct routes, so a capability change across a /model switch is
+    // provable rather than inferred: the boot default (deepseek-v4-flash) is
+    // text-only, the switch target (deepseek-v4-pro) is vision-capable. Every
+    // test that boots past awaitDefaultModel's 3s deadline reaches the
+    // prefetch, so this must be defined on the shared fixture — not per-test.
+    resolveModelInfo: async (provider: string, modelId: string) => (
+      modelId === 'deepseek-v4-pro'
+        ? { provider, id: modelId, name: 'V4 Pro', inputModalities: ['text', 'image'] }
+        : { provider, id: modelId, name: 'V4 Flash', inputModalities: ['text'] }
+    ),
   }
   const ctx: any = {
     logger: { warn: () => {} },
@@ -178,24 +188,79 @@ describe('host apply (full path)', () => {
     }))
   })
 
-  it('registers a live-model system-prompt section that always names the currently active model', async () => {
+  it('registers a live-model system-prompt section that names the active model and its real capabilities', async () => {
     const { ctx, handlers, getSections } = fakeContext()
     vi.useFakeTimers()
     try {
       apply(ctx)
       await vi.advanceTimersByTimeAsync(3000)
+      // One more flush: the prefetch fires inside startAgent after
+      // awaitDefaultModel resolves, and its `.then` lands a microtask later.
+      await vi.advanceTimersByTimeAsync(0)
       const liveModel = getSections().find(s => s.name === 'dsh-tui:live-model')
       expect(liveModel).toBeDefined()
       expect(typeof liveModel!.text).toBe('function')
-      // Before any switch: reflects the boot default from agentDefaultModel.
-      expect((liveModel!.text as () => string)()).toContain('deepseek-official/deepseek-v4-flash')
+      const render = (): string => (liveModel!.text as () => string)()
+      // Before any switch: the boot default from agentDefaultModel, plus the
+      // text-only capability the fixture advertises for that route.
+      expect(render()).toContain('deepseek-official/deepseek-v4-flash')
+      expect(render()).toContain('accepts text input only')
+      expect(render()).not.toContain('text and image input')
+      // The calmer framing: history is reframed, not disavowed.
+      expect(render()).toContain('normal and expected')
+      expect(render()).not.toContain('trust your own current capabilities')
       // After /model: the SAME registered section (a live function, not a
-      // snapshot) reflects the new model on its next call -- this is what
-      // makes it correct on every later turn, not just the one right after
-      // the switch.
+      // snapshot) reflects both the new model AND its different capabilities.
       handlers.get('model')!({ rawInput: 'deepseek-official/deepseek-v4-pro' })
       await vi.advanceTimersByTimeAsync(0)
-      expect((liveModel!.text as () => string)()).toContain('deepseek-official/deepseek-v4-pro')
+      await vi.advanceTimersByTimeAsync(0)
+      expect(render()).toContain('deepseek-official/deepseek-v4-pro')
+      expect(render()).toContain('accepts text and image input')
+      expect(render()).not.toContain('accepts text input only')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('omits the capability clause when the route does not advertise input modalities', async () => {
+    const { ctx, getSections } = fakeContext()
+    // Absent inputModalities is "unknown", not "no images" — the section must
+    // say nothing rather than assert either capability.
+    ;(ctx as any).llm.resolveModelInfo = async (provider: string, modelId: string) => ({ provider, id: modelId, name: 'V4 Flash' })
+    vi.useFakeTimers()
+    try {
+      apply(ctx)
+      await vi.advanceTimersByTimeAsync(3000)
+      await vi.advanceTimersByTimeAsync(0)
+      const liveModel = getSections().find(s => s.name === 'dsh-tui:live-model')
+      const text = (liveModel!.text as () => string)()
+      expect(text).toContain('deepseek-official/deepseek-v4-flash')
+      expect(text).not.toContain('accepts text')
+      expect(text).toContain('normal and expected')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it.each([
+    ['a rejected promise', async () => { throw new Error('adapter exploded') }],
+    ['a synchronous throw', () => { throw new Error('adapter exploded') }],
+    ['a non-thenable return', () => undefined],
+  ])('boots and degrades gracefully when resolveModelInfo fails with %s', async (_label, impl) => {
+    const { ctx, getSections, getAgent } = fakeContext()
+    ;(ctx as any).llm.resolveModelInfo = impl
+    vi.useFakeTimers()
+    try {
+      apply(ctx)
+      await vi.advanceTimersByTimeAsync(3000)
+      await vi.advanceTimersByTimeAsync(0)
+      // Boot completed: the agent exists and the section is registered.
+      expect(getAgent()).toBeDefined()
+      const liveModel = getSections().find(s => s.name === 'dsh-tui:live-model')
+      expect(liveModel).toBeDefined()
+      const text = (liveModel!.text as () => string)()
+      expect(text).toContain('deepseek-official/deepseek-v4-flash')
+      expect(text).not.toContain('accepts text')
     } finally {
       vi.useRealTimers()
     }

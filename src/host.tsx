@@ -17,7 +17,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type AgentHandle, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type { ModelSelection } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, boundContextSummary } from '@deepseek-ai/dsh-llm'
-import type { ReasoningEffortId, ContentBlock } from '@deepseek-ai/dsh-llm'
+import type { ReasoningEffortId, ContentBlock, LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
@@ -177,16 +177,33 @@ export function apply(ctx: Context): void {
     // self-belief on turns arbitrarily far downstream. This section is
     // reassembled fresh every step (dsh-system-prompt's model), so it always
     // states the model actually serving THIS request, even if the model was
-    // switched many turns after any injected notice.
+    // switched many turns after any injected notice. Capability facts come
+    // from `modelCapabilities` (prefetched -- `text()` cannot await), so the
+    // section states what this route actually supports instead of leaving
+    // the model to infer it from a stale earlier turn.
     agentCtx.systemPrompt.section({
       name: 'dsh-tui:live-model',
       order: -90,
       text: () => {
         const current = selectionFor(scoped).current
-        return `You are being served, right now, by ${current.provider}/${current.model}. `
-          + `If an earlier turn in this conversation described "this model"'s identity or capabilities `
-          + `(e.g. text-only, no image support) differently, that turn was produced by a different `
-          + `backend before a model switch — trust your own current capabilities over it.`
+        // `inputModalities` is three-valued, and the distinction matters: an
+        // adapter that lists modalities and omits 'image' is a CONFIRMED no,
+        // while an adapter that omits the field entirely is telling us
+        // nothing (dsh-llm's own wording: "absent means unknown, while an
+        // explicit omission is negative capability"). Only the two confirmed
+        // cases are stated; unknown says nothing rather than guessing in
+        // either direction, and costs no tokens doing so.
+        const modalities = modelCapabilities.get(`${current.provider}/${current.model}`)?.inputModalities
+        const capability = modalities === undefined
+          ? ''
+          : modalities.includes('image')
+            ? ', which accepts text and image input — you can see images attached to this conversation'
+            : ', which accepts text input only — you cannot see images attached to this conversation'
+        return `You are being served, right now, by ${current.provider}/${current.model}${capability}. `
+          + `Switching model mid-session is normal and expected here, and the conversation carries over `
+          + `unchanged when it happens: if an earlier turn described "this model"'s identity or capabilities `
+          + `differently, that description was most likely accurate for whichever model was active then. `
+          + `This line always describes the model serving the current request.`
       },
     })
   }
@@ -219,6 +236,10 @@ export function apply(ctx: Context): void {
       ? { provider: resolvedDefault.provider, model: args.model }
       : resolvedDefault
     store.setModel(model)
+    // Warm the capability cache before the agent exists, so the live-model
+    // section has real facts as early as the fetch allows. Fire-and-forget: it
+    // cannot throw (see prefetchModelCapabilities) and boot must not wait on it.
+    prefetchModelCapabilities(model.provider, model.model)
     if (resumeId !== undefined) {
       agentHandle = await ctx.agents.resume({
         resumeSessionId: SessionId(resumeId),
@@ -349,6 +370,48 @@ export function apply(ctx: Context): void {
     return cached
   }
 
+  // The live-model prompt section (see setup) must state real capability facts
+  // from a SYNCHRONOUS `text()` — dsh-system-prompt's `PromptSection.text` is
+  // `string | ((context) => string)`, with no async form. So capability data is
+  // resolved ahead of the turn that needs it and parked here, where `text()`
+  // can read it with a plain Map lookup. A key that isn't present yet (or whose
+  // fetch failed) simply means "no confirmed capability facts", and the section
+  // degrades to naming provider/model only.
+  const modelCapabilities = new Map<string, LlmResolvedModelInfo>()
+
+  /**
+   * Fire-and-forget warm of `modelCapabilities` for one route.
+   *
+   * Called from agent boot and from `/model`, neither of which may fail because
+   * a capability lookup did. A user-registered route (`/addprovider`) can point
+   * at an arbitrary third-party adapter, so this defends against both failure
+   * shapes such an adapter can produce: a SYNCHRONOUS throw from
+   * `resolveModelInfo` itself (the `try`, since `resolveModelInfoCached` wraps
+   * the call in no guard of its own) and a rejected promise (the second `then`
+   * argument, which also keeps the rejection from surfacing as an unhandled
+   * one — `resolveModelInfoCached`'s own `.catch` handles a different branch of
+   * the same promise, for cache eviction, and does not cover this one).
+   * Deliberately returns void: there is nothing for either caller to await.
+   */
+  function prefetchModelCapabilities(providerId: string, modelId: string): void {
+    const key = `${providerId}/${modelId}`
+    try {
+      void resolveModelInfoCached(providerId, modelId).then(
+        (info) => {
+          // A misbehaving adapter can resolve to a non-object; caching that
+          // would make `text()` read `inputModalities` off a non-record.
+          if (info !== null && typeof info === 'object') modelCapabilities.set(key, info)
+        },
+        () => {
+          // Already logged/handled by whoever cares; the section degrades.
+        },
+      )
+    } catch {
+      // Synchronous throw (including a non-thenable return, where `.then` is
+      // not a function): the section degrades to provider/model only.
+    }
+  }
+
   // --- Command option providers --------------------------------------------
   // A command whose bare invocation should offer a picker maps to a provider
   // that yields a SelectOption list (sync from projections, or async from the
@@ -466,6 +529,9 @@ export function apply(ctx: Context): void {
       selectionFor(agent).current = next
       model = next
       store.setModel(next)
+      // Same warm as at boot: `text()` is synchronous, so the new route's
+      // capability facts have to be in flight before the next turn assembles.
+      prefetchModelCapabilities(next.provider, next.model)
       // The switch is in place — no session rebuild — so the conversation history
       // the new model inherits still contains prior assistant turns written by the
       // OLD model, including any self-description of its own identity/capabilities
