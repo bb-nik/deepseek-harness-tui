@@ -16,7 +16,7 @@ import { homedir } from 'node:os'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type AgentHandle, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type { ModelSelection } from '@deepseek-ai/dsh-agent'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, boundContextSummary } from '@deepseek-ai/dsh-llm'
 import type { ReasoningEffortId, ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -448,11 +448,38 @@ export function apply(ctx: Context): void {
       selectionFor(agent).current = next
       model = next
       store.setModel(next)
+      // The switch is in place — no session rebuild — so the conversation history
+      // the new model inherits still contains prior assistant turns written by the
+      // OLD model, including any self-description of its own identity/capabilities
+      // (e.g. "this model is text-only"). Without this notice, the new model has no
+      // signal that those turns describe a different backend and tends to continue
+      // the stale claim as if it were its own past output.
+      agent.inject(createUserMessage({
+        content: [{
+          type: 'text',
+          text: `System notice: the model serving this session just changed to ${next.provider}/${next.model}. `
+            + `This is a real backend switch, not a role-play continuation — any earlier assistant turn's claims `
+            + `about "this model"'s identity, capabilities, or limitations (e.g. being text-only or unable to `
+            + `process images) describe the PREVIOUS model, not you. Rely on your own actual capabilities from `
+            + `now on, not prior turns' self-descriptions.`,
+        }],
+        source: {
+          kind: 'plugin',
+          plugin: 'dsh-tui',
+          form: 'notice',
+          summary: boundContextSummary(`model switched to ${next.provider}/${next.model}`),
+        },
+      }))
       try {
         await ctx.agentDefaultModel.saveSelection(next)
       } catch (error) {
         ctx.logger.warn(`dsh-tui: model switched but not saved as default: ${String(error)}`)
       }
+      // User-visible counterpart to the model-facing notice above: the human
+      // driving the switch should see the same fact — full history carries
+      // over unchanged, only the model serving the next turn changes.
+      store.setNotice(`switched to ${next.provider}/${next.model} — full conversation history carries over unchanged`)
+      setTimeout(() => { store.setNotice(undefined) }, 6000)
     } catch (error) {
       store.setNotice(`/model failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
       setTimeout(() => { store.setNotice(undefined) }, 6000)

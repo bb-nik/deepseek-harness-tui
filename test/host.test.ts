@@ -32,6 +32,7 @@ interface FakeAgent {
   session: { events: unknown[]; requestHeader: () => undefined }
   whenIdle: () => Promise<void>
   followup: ReturnType<typeof vi.fn>
+  inject: ReturnType<typeof vi.fn>
   status: 'idle' | 'running'
 }
 
@@ -69,6 +70,7 @@ function fakeContext() {
           session: { events: [], requestHeader: () => undefined },
           whenIdle: async () => {},
           followup: vi.fn(),
+          inject: vi.fn(),
           status: 'idle',
         }
         return { agent, dispose: vi.fn(async () => {}) }
@@ -129,19 +131,35 @@ describe('host apply (full path)', () => {
   })
 
   it('executes /providers and /model handlers without an inject error', async () => {
-    const { ctx, handlers } = fakeContext()
-    apply(ctx)
-    await new Promise(resolve => setTimeout(resolve, 0))
-    // /providers reads ctx.llm via property access — the regression this guards.
-    const providers = handlers.get('providers')
-    expect(providers).toBeDefined()
-    expect(providers!({ rawInput: '' })).toEqual({ kind: 'success' })
-    // /model with an explicit provider/model switches in place.
-    const modelHandler = handlers.get('model')
-    expect(modelHandler).toBeDefined()
-    expect(modelHandler!({ rawInput: 'deepseek-official/deepseek-v4-pro' })).toEqual({ kind: 'success' })
-    // Give the async switch a beat to settle.
-    await new Promise(resolve => setTimeout(resolve, 0))
+    const { ctx, handlers, getAgent } = fakeContext()
+    // This fixture's currentSelection() is a constant, so awaitDefaultModel's
+    // change-detection poll never resolves early; advance virtual time past
+    // its bounded deadline instead of waiting on the real clock (see the
+    // /status test below for the same pattern).
+    vi.useFakeTimers()
+    try {
+      apply(ctx)
+      await vi.advanceTimersByTimeAsync(3000)
+      // /providers reads ctx.llm via property access — the regression this guards.
+      const providers = handlers.get('providers')
+      expect(providers).toBeDefined()
+      expect(providers!({ rawInput: '' })).toEqual({ kind: 'success' })
+      // /model with an explicit provider/model switches in place.
+      const modelHandler = handlers.get('model')
+      expect(modelHandler).toBeDefined()
+      expect(modelHandler!({ rawInput: 'deepseek-official/deepseek-v4-pro' })).toEqual({ kind: 'success' })
+      // Give the async switch a beat to settle.
+      await vi.advanceTimersByTimeAsync(0)
+    } finally {
+      vi.useRealTimers()
+    }
+    // The in-place switch injects a notice so the new model doesn't inherit the
+    // old model's self-description from conversation history as its own.
+    expect(getAgent()?.inject).toHaveBeenCalledWith(expect.objectContaining({
+      role: 'user',
+      content: [expect.objectContaining({ type: 'text', text: expect.stringContaining('deepseek-official/deepseek-v4-pro') })],
+      source: expect.objectContaining({ kind: 'plugin', plugin: 'dsh-tui', form: 'notice' }),
+    }))
   })
 
   it('executes /status and /rename handlers', async () => {
